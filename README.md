@@ -85,7 +85,7 @@ Submits the token form automatically. Zero external dependencies (stdlib only).
 ./submit_form.py --id 24-22322-1 --email you@example.com --wait
 
 # Batch submit from CSV (format: id,email — header row optional)
-./submit_form.py --batch students.csv
+./submit_form.py --batch students.csv --interval 0
 
 # Dry run — validates without actually posting
 ./submit_form.py --id 24-22322-1 --email you@example.com --dry-run
