@@ -1,0 +1,4 @@
+form_monitor.log
+.form_opened_alerted
+__pycache__/
+*.pyc
