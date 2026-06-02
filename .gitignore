@@ -1,4 +1,5 @@
 form_monitor.log
 .form_opened_alerted
+.auto_submit_done
 __pycache__/
 *.pyc

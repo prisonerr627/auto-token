@@ -6,10 +6,55 @@ Automates monitoring and submission of the **Summer 2025-26 Final Registration T
 
 | File | Purpose |
 |------|---------|
-| `submit_form.py` | Submit the form (single, batch, or wait-then-submit) |
+| `auto_submit.py` | **"Be first" auto-submitter** — keep-alive poll, content-based open detection, instant auto-submit, post-submit Discord ping |
+| `submit_form.py` | Manual / batch submitter (single, batch, or wait-then-submit) |
 | `form_monitor.sh` | One-shot monitor: checks if the form is open, fires a Discord webhook alert |
 
 ---
+
+## auto_submit.py (recommended for "be first")
+
+A single long-running process that removes the human from the loop: it watches
+the form and **submits automatically the instant it opens**, then pings Discord
+to tell you it's already done.
+
+```bash
+# Wait for open, submit, ping Discord (default 1s poll):
+./auto_submit.py --id 24-22322-1 --email you@example.com
+
+# Known open time -> ramp to 200ms polling in the last 30s before it:
+./auto_submit.py --id 24-22322-1 --email you@example.com \
+    --open-at "2026-06-03 12:00" --fast-interval 0.2 --ramp-window 30
+
+# Multiple entries:
+./auto_submit.py --batch students.csv
+
+# Watch + report timing only, never submit, never ping:
+./auto_submit.py --id x --email y --dry-run
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--id` / `--email` | — | Single submission |
+| `--batch FILE` | — | CSV/TSV of `id,email` rows |
+| `--interval N` | 1.0 | Normal poll interval (seconds) |
+| `--fast-interval N` | 0.2 | Poll interval during the pre-open ramp |
+| `--open-at "Y-m-d H:M"` | — | Known open time (local); enables the ramp |
+| `--ramp-window N` | 30 | Seconds before `--open-at` to start fast polling |
+| `--max-minutes N` | 0 | Stop after N minutes (0 = run until open) |
+| `--no-discord` | off | Submit but don't ping Discord |
+| `--dry-run` | off | Detect open but never submit / never ping |
+| `--force` | off | Ignore the `.auto_submit_done` flag from a prior run |
+
+**Why this design (and why not Rust):** the bottleneck for being first is
+*detection latency* and *keeping a human out of the loop*, not language speed.
+Your code spends <1ms per poll; the network round trip is tens of ms. So the
+wins are: keep-alive connection (TLS handshake paid once), tight polling, an
+optional ramp into a known open time, and the machine submitting — not you.
+A cloud VM near Google's frontend (lower RTT) helps far more than any rewrite.
+
+After a successful submit it writes `.auto_submit_done` so a re-run won't
+double-submit. Re-run with `--force` to override.
 
 ## submit_form.py
 
@@ -70,7 +115,18 @@ Edit `form_monitor.sh` and set `WEBHOOK_URL` to your Discord webhook.
 
 ## Detection logic
 
-- **Closed:** `GET /viewform` redirects to `/closedform`
-- **Open:** final URL is not `/closedform` and page contains `FB_PUBLIC_LOAD_DATA_`
+**Do not rely on the HTTP status code.** When the form is not yet open, Google
+serves a real HTTP 200 placeholder page ("Token generation will start from
+mentioned time") — a status check would falsely report "open".
 
-Submission success is detected when the `formResponse` endpoint returns an empty questions array (`data[1] == []` in the embedded JSON) — this is the server-side confirmation signature Google Forms uses.
+The reliable, content-based signal:
+
+- **Open** ⇔ the page contains `FB_PUBLIC_LOAD_DATA_` *and* its questions array
+  actually includes the Student ID field (numeric id `1220498033`). Note the
+  literal string `entry.1220498033` is *not* in the server HTML — only the
+  numeric id appears in the JSON payload; the `entry.` prefix is added by JS.
+- **Closed / placeholder** ⇔ no `FB_PUBLIC_LOAD_DATA_` payload at all.
+
+Submission success is detected when the `formResponse` endpoint returns an empty
+questions array (`data[1] == []` in the embedded JSON) — the server-side
+confirmation signature Google Forms uses.
