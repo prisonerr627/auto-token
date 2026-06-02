@@ -199,6 +199,67 @@ def discord(content):
         return None
 
 
+def measure_latency(host, count, interval, head=True):
+    """Measure round-trip latency to `host` and print a summary.
+
+    Reports the TLS connect (handshake) time once, then `count` warm requests
+    over a kept-alive connection — that warm RTT is what matters for "be first",
+    and what you compare across regions/VPNs to pick the lowest-latency vantage.
+
+    Uses a HEAD on the viewform by default (cheap; no body download) so the
+    number reflects network round-trip, not payload size. Returns the median
+    warm RTT in ms (or None if every request failed).
+    """
+    ctx = ssl.create_default_context()
+    method = "HEAD" if head else "GET"
+
+    t0 = time.monotonic()
+    try:
+        conn = http.client.HTTPSConnection(host, timeout=15, context=ctx)
+        conn.connect()  # DNS + TCP + TLS handshake
+        connect_ms = (time.monotonic() - t0) * 1000
+        log(f"connect to {host}: {connect_ms:.1f}ms (DNS+TCP+TLS handshake)")
+    except Exception as e:
+        log(f"connect to {host} FAILED: {e}")
+        return None
+
+    samples = []
+    for i in range(1, count + 1):
+        t = time.monotonic()
+        try:
+            conn.request(method, VIEW_PATH, headers=BASE_HEADERS)
+            resp = conn.getresponse()
+            resp.read()  # drain so the connection can be reused
+            dt = (time.monotonic() - t) * 1000
+            samples.append(dt)
+            log(f"  req {i}/{count}: {dt:.1f}ms (http {resp.status})")
+        except Exception as e:
+            log(f"  req {i}/{count}: FAILED ({e})")
+            conn.close()
+            try:
+                conn = http.client.HTTPSConnection(host, timeout=15, context=ctx)
+                conn.connect()
+            except Exception:
+                break
+        if i < count:
+            time.sleep(interval)
+    conn.close()
+
+    if not samples:
+        log("No successful requests — could not measure latency.")
+        return None
+
+    s = sorted(samples)
+    n = len(s)
+    avg = sum(s) / n
+    median = s[n // 2] if n % 2 else (s[n // 2 - 1] + s[n // 2]) / 2
+    p95 = s[min(n - 1, int(round(0.95 * (n - 1))))]
+    log(f"latency to {host} over {n} warm {method}s: "
+        f"min {s[0]:.1f} / median {median:.1f} / avg {avg:.1f} / "
+        f"p95 {p95:.1f} / max {s[-1]:.1f} ms")
+    return median
+
+
 def parse_open_at(s):
     for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M:%S",
                 "%Y-%m-%dT%H:%M"):
@@ -283,7 +344,21 @@ def main():
     ap.add_argument("--block-alert-after", type=int, default=5,
                     help="Discord-warn after N consecutive blocked/failed polls "
                          "(default 5; 0 disables block alerts)")
+    ap.add_argument("--latency-test", nargs="?", type=int, const=10, default=None,
+                    metavar="N",
+                    help="Measure round-trip latency to Google (N warm requests, "
+                         "default 10), print min/median/avg/p95/max, then exit. "
+                         "Run from each region/VPN to compare. No --id/--email needed.")
+    ap.add_argument("--latency-get", action="store_true",
+                    help="Use full GET instead of HEAD for --latency-test "
+                         "(includes payload download time)")
     args = ap.parse_args()
+
+    # Latency probe mode: measure RTT to Google and exit (no submission).
+    if args.latency_test is not None:
+        med = measure_latency(FORM_HOST, args.latency_test, args.interval,
+                              head=not args.latency_get)
+        return 0 if med is not None else 1
 
     entries = load_entries(args)
     if not entries:

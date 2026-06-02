@@ -30,6 +30,10 @@ to tell you it's already done.
 
 # Watch + report timing only, never submit, never ping:
 ./auto_submit.py --id x --email y --dry-run
+
+# Measure round-trip latency to Google (to pick the lowest-latency region/VPN):
+./auto_submit.py --latency-test          # 10 warm requests
+./auto_submit.py --latency-test 30        # 30 requests
 ```
 
 | Flag | Default | Description |
@@ -45,6 +49,26 @@ to tell you it's already done.
 | `--no-discord` | off | Submit but don't ping Discord |
 | `--dry-run` | off | Detect open but never submit / never ping |
 | `--force` | off | Ignore the `.auto_submit_done` flag from a prior run |
+| `--latency-test [N]` | — | Measure RTT to Google (N warm requests, default 10), print stats, exit |
+| `--latency-get` | off | Use full GET instead of HEAD for the latency test |
+
+### Measuring latency (which region is fastest)
+
+`--latency-test` opens one keep-alive connection to `docs.google.com`, reports
+the **connect time** (DNS + TCP + TLS handshake) once, then fires N warm
+requests and prints `min / median / avg / p95 / max` in ms:
+
+```
+$ ./auto_submit.py --latency-test 20
+[..] connect to docs.google.com: 36.8ms (DNS+TCP+TLS handshake)
+[..] latency to docs.google.com over 20 warm HEADs: min 41 / median 55 / avg 58 / p95 92 / max 110 ms
+```
+
+Run it from each candidate vantage point (home, VPN exit, a cloud VM in `us`,
+`eu`, `asia-south`, …) and pick the one with the **lowest median** — that's the
+warm RTT every poll/submit pays, so it directly decides who's first. By default
+it uses a cheap `HEAD` so the number reflects pure network round-trip; add
+`--latency-get` to include the page download too.
 
 **Why this design (and why not Rust):** the bottleneck for being first is
 *detection latency* and *keeping a human out of the loop*, not language speed.
