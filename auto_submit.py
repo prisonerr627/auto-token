@@ -73,7 +73,22 @@ BASE_HEADERS = {
     "Accept": "text/html,application/xhtml+xml",
     "Accept-Language": "en-US,en;q=0.9",
     "Connection": "keep-alive",
+    # Defeat any intermediary cache (transparent proxy / VPN exit) that could
+    # otherwise serve a stale "closed" page after the form has opened.
+    "Cache-Control": "no-cache, no-store, max-age=0",
+    "Pragma": "no-cache",
 }
+
+
+def cachebust_path(path):
+    """Append a unique query param so every poll is a guaranteed cache miss.
+
+    Google ignores unknown query params on /viewform, but any caching proxy
+    between us and Google keys on the full URL — so a changing token forces a
+    fresh fetch and we never read a stale closed-page after the form opens.
+    """
+    sep = "&" if "?" in path else "?"
+    return f"{path}{sep}_cb={time.time_ns()}"
 
 
 def now_ms():
@@ -227,7 +242,7 @@ def measure_latency(host, count, interval, head=True):
     for i in range(1, count + 1):
         t = time.monotonic()
         try:
-            conn.request(method, VIEW_PATH, headers=BASE_HEADERS)
+            conn.request(method, cachebust_path(VIEW_PATH), headers=BASE_HEADERS)
             resp = conn.getresponse()
             resp.read()  # drain so the connection can be reused
             dt = (time.monotonic() - t) * 1000
@@ -330,7 +345,10 @@ def main():
                     help="Normal poll interval seconds (default 1.0)")
     ap.add_argument("--fast-interval", type=float, default=0.2,
                     help="Poll interval during the pre-open ramp (default 0.2)")
-    ap.add_argument("--open-at", help="Known open time, e.g. '2026-06-03 12:00' (local)")
+    ap.add_argument("--open-at",
+                    help="Known open time in local (BD) time — 24-hour format only. "
+                         "Examples: '2026-06-03 19:00' (7:00 PM), '2026-06-03 09:30' (9:30 AM). "
+                         "AM/PM and 2-digit years are NOT accepted.")
     ap.add_argument("--ramp-window", type=float, default=30,
                     help="Seconds before --open-at to switch to fast polling (default 30)")
     ap.add_argument("--max-minutes", type=float, default=0,
@@ -405,7 +423,8 @@ def main():
 
         bad = None  # reason string if this poll failed/blocked
         try:
-            status, body = conn.request("GET", VIEW_PATH, headers=BASE_HEADERS)
+            status, body = conn.request("GET", cachebust_path(VIEW_PATH),
+                                        headers=BASE_HEADERS)
             polls += 1
             if is_blocked(status, body):
                 bad = f"blocked/throttled (http {status})"

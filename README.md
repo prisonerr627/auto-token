@@ -7,7 +7,6 @@ Automates monitoring and submission of the **Summer 2025-26 Final Registration T
 | File | Purpose |
 |------|---------|
 | `auto_submit.py` | **"Be first" auto-submitter** — keep-alive poll, content-based open detection, instant auto-submit, post-submit Discord ping |
-| `form_monitor.sh` | One-shot monitor: checks if the form is open, fires a Discord webhook alert |
 
 ---
 
@@ -21,9 +20,11 @@ to tell you it's already done.
 # Wait for open, submit, ping Discord (default 1s poll):
 ./auto_submit.py --id 24-22322-1 --email you@example.com
 
-# Known open time -> ramp to 200ms polling in the last 30s before it:
+# Known open time -> ramp to 200ms polling in the last 30s before it.
+# Time is Bangladesh local time, 24-hour format (YYYY-MM-DD HH:MM).
+# 7:00 PM BD = 19:00,  9:30 AM BD = 09:30.  AM/PM and 2-digit years are NOT accepted.
 ./auto_submit.py --id 24-22322-1 --email you@example.com \
-    --open-at "2026-06-03 12:00" --fast-interval 0.2 --ramp-window 30
+    --open-at "2026-06-03 19:00" --fast-interval 0.2 --ramp-window 30
 
 # Multiple entries:
 ./auto_submit.py --batch students.csv --interval 0
@@ -42,7 +43,7 @@ to tell you it's already done.
 | `--batch FILE` | — | CSV/TSV of `id,email` rows |
 | `--interval N` | 1.0 | Normal poll interval (seconds) |
 | `--fast-interval N` | 0.2 | Poll interval during the pre-open ramp |
-| `--open-at "Y-m-d H:M"` | — | Known open time (local); enables the ramp |
+| `--open-at "YYYY-MM-DD HH:MM"` | — | Known open time in BD local time, 24-hour (e.g. `"2026-06-03 19:00"` for 7 PM). Enables the ramp. |
 | `--ramp-window N` | 30 | Seconds before `--open-at` to start fast polling |
 | `--max-minutes N` | 0 | Stop after N minutes (0 = run until open) |
 | `--block-alert-after N` | 5 | Discord-warn after N consecutive blocked/failed polls (0 disables) |
@@ -93,28 +94,6 @@ BLOCKED …`) so you can switch IP/VPN. It alerts **once per block episode** (no
 spam) and sends a `✅ Monitor recovered` ping when polling resumes. To reduce
 block risk in the first place: keep `--interval >= 0.2`, and use `--open-at` so
 you only poll fast in the final window rather than all day.
-
-## form_monitor.sh
-
-Run on a schedule (e.g. via cron) to watch for the form opening and send a Discord webhook alert.
-
-```bash
-# Run manually
-./form_monitor.sh
-
-# Add to crontab (every minute)
-* * * * * /path/to/form_monitor.sh >/dev/null 2>&1
-```
-
-- Writes status to `form_monitor.log`
-- Once the alert fires it creates `.form_opened_alerted` to prevent duplicates
-- To re-arm: `rm .form_opened_alerted`
-
-### Configuration
-
-Edit `form_monitor.sh` and set `WEBHOOK_URL` to your Discord webhook.
-
----
 
 ## Detection logic
 
