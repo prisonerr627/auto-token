@@ -26,7 +26,7 @@ to tell you it's already done.
     --open-at "2026-06-03 12:00" --fast-interval 0.2 --ramp-window 30
 
 # Multiple entries:
-./auto_submit.py --batch students.csv
+./auto_submit.py --batch students.csv --interval 0
 
 # Watch + report timing only, never submit, never ping:
 ./auto_submit.py --id x --email y --dry-run
