@@ -42,6 +42,7 @@ to tell you it's already done.
 | `--open-at "Y-m-d H:M"` | — | Known open time (local); enables the ramp |
 | `--ramp-window N` | 30 | Seconds before `--open-at` to start fast polling |
 | `--max-minutes N` | 0 | Stop after N minutes (0 = run until open) |
+| `--block-alert-after N` | 5 | Discord-warn after N consecutive blocked/failed polls (0 disables) |
 | `--no-discord` | off | Submit but don't ping Discord |
 | `--dry-run` | off | Detect open but never submit / never ping |
 | `--force` | off | Ignore the `.auto_submit_done` flag from a prior run |
@@ -55,6 +56,20 @@ A cloud VM near Google's frontend (lower RTT) helps far more than any rewrite.
 
 After a successful submit it writes `.auto_submit_done` so a re-run won't
 double-submit. Re-run with `--force` to override.
+
+### Block detection & alerting
+
+Google can rate-limit aggressive polling (HTTP 429/403/503, or an "unusual
+traffic" / captcha interstitial — sometimes served as HTTP 200). A block is
+dangerous because the watcher would see no form payload and silently treat it
+as "still closed", potentially **missing the open moment**.
+
+To guard against this, the loop counts consecutive blocked/failed polls and, on
+crossing `--block-alert-after`, fires a Discord warning (`🚫 Monitor may be
+BLOCKED …`) so you can switch IP/VPN. It alerts **once per block episode** (no
+spam) and sends a `✅ Monitor recovered` ping when polling resumes. To reduce
+block risk in the first place: keep `--interval >= 0.2`, and use `--open-at` so
+you only poll fast in the final window rather than all day.
 
 ## submit_form.py
 

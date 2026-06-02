@@ -148,6 +148,28 @@ def is_open(body):
     return False
 
 
+BLOCK_SIGNATURES = (
+    "our systems have detected unusual traffic",
+    "unusual traffic from your computer network",
+    "/sorry/index",
+    "recaptcha",
+    "captcha-form",
+    "automated queries",
+)
+
+
+def is_blocked(status, body):
+    """True if Google appears to be rate-limiting / blocking us.
+
+    Covers explicit throttle status codes and the "unusual traffic" / captcha
+    interstitial Google serves (often as HTTP 200 or via a /sorry/ redirect).
+    """
+    if status in (429, 403, 503):
+        return True
+    low = body[:5000].lower()
+    return any(sig in low for sig in BLOCK_SIGNATURES)
+
+
 def submit_recorded(reply_body):
     """True if the formResponse reply indicates the response was recorded."""
     m = re.search(r"FB_PUBLIC_LOAD_DATA_ = (.*?);</script>", reply_body, re.S)
@@ -258,6 +280,9 @@ def main():
                     help="Submit but do not send Discord alerts")
     ap.add_argument("--force", action="store_true",
                     help="Ignore the .auto_submit_done flag from a prior run")
+    ap.add_argument("--block-alert-after", type=int, default=5,
+                    help="Discord-warn after N consecutive blocked/failed polls "
+                         "(default 5; 0 disables block alerts)")
     args = ap.parse_args()
 
     entries = load_entries(args)
@@ -284,6 +309,13 @@ def main():
     else:
         log(f"Polling every {args.interval}s (content-based open check) ...")
 
+    # Block/error alerting: warn on Discord once we hit N consecutive bad polls
+    # (a block episode), and once more when polling recovers. Suppressed in
+    # dry-run / --no-discord, and disabled entirely when --block-alert-after 0.
+    block_alerts = args.block_alert_after > 0 and not args.dry_run and not args.no_discord
+    consec_fail = 0
+    block_alerted = False
+
     polls = 0
     while True:
         if deadline and time.monotonic() > deadline:
@@ -296,21 +328,39 @@ def main():
             if secs_to_open <= args.ramp_window:
                 interval = args.fast_interval
 
+        bad = None  # reason string if this poll failed/blocked
         try:
             status, body = conn.request("GET", VIEW_PATH, headers=BASE_HEADERS)
             polls += 1
-            if is_open(body):
+            if is_blocked(status, body):
+                bad = f"blocked/throttled (http {status})"
+            elif is_open(body):
                 log(f"FORM OPEN detected after {polls} polls (http {status}). "
                     "Submitting NOW.")
                 ok = do_submissions(conn, entries, args.dry_run, args.no_discord)
                 if not args.dry_run and ok:
                     open(DONE_FLAG, "w").close()
                 return 0 if ok else 1
-            else:
-                if polls % 20 == 1:  # avoid log spam
-                    log(f"still closed (poll #{polls}, http {status})")
+            elif polls % 20 == 1:  # avoid log spam
+                log(f"still closed (poll #{polls}, http {status})")
         except Exception as e:
-            log(f"poll error: {e}")
+            bad = f"poll error: {e}"
+
+        if bad:
+            consec_fail += 1
+            log(f"{bad} (consecutive #{consec_fail})")
+            if block_alerts and not block_alerted and consec_fail >= args.block_alert_after:
+                discord(f"🚫 **Monitor may be BLOCKED** — {consec_fail} consecutive "
+                        f"bad polls ({bad}) as of {now_ms()}. The watcher is still "
+                        "retrying, but you may need to switch IP/VPN. It will NOT "
+                        "detect the form opening while blocked.")
+                block_alerted = True
+        else:
+            if block_alerted:
+                discord(f"✅ **Monitor recovered** at {now_ms()} — polling normally "
+                        "again after a block episode.")
+            consec_fail = 0
+            block_alerted = False
 
         time.sleep(interval)
 
