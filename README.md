@@ -7,7 +7,6 @@ Automates monitoring and submission of the **Summer 2025-26 Final Registration T
 | File | Purpose |
 |------|---------|
 | `auto_submit.py` | **"Be first" auto-submitter** — keep-alive poll, content-based open detection, instant auto-submit, post-submit Discord ping |
-| `submit_form.py` | Manual / batch submitter (single, batch, or wait-then-submit) |
 | `form_monitor.sh` | One-shot monitor: checks if the form is open, fires a Discord webhook alert |
 
 ---
@@ -70,41 +69,6 @@ BLOCKED …`) so you can switch IP/VPN. It alerts **once per block episode** (no
 spam) and sends a `✅ Monitor recovered` ping when polling resumes. To reduce
 block risk in the first place: keep `--interval >= 0.2`, and use `--open-at` so
 you only poll fast in the final window rather than all day.
-
-## submit_form.py
-
-Submits the token form automatically. Zero external dependencies (stdlib only).
-
-### Usage
-
-```bash
-# Single submission
-./submit_form.py --id 24-22322-1 --email you@example.com
-
-# Wait until form is open, then submit immediately
-./submit_form.py --id 24-22322-1 --email you@example.com --wait
-
-# Batch submit from CSV (format: id,email — header row optional)
-./submit_form.py --batch students.csv --interval 0
-
-# Dry run — validates without actually posting
-./submit_form.py --id 24-22322-1 --email you@example.com --dry-run
-```
-
-### Options
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--id` | — | Student ID |
-| `--email` | — | Email address |
-| `--batch FILE` | — | CSV/TSV file of `id,email` rows |
-| `--wait` | off | Poll until the form is open, then submit |
-| `--interval N` | 5 | Poll interval in seconds (used with `--wait`) |
-| `--dry-run` | off | Print the request without POSTing |
-
-Exit code `0` = all submissions recorded, `1` = at least one failure.
-
----
 
 ## form_monitor.sh
 
