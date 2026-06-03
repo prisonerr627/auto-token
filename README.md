@@ -18,6 +18,7 @@ to tell you it's already done.
 
 ```bash
 # Wait for open, submit, ping Discord (default 1s poll):
+./auto_submit.py --id 24-22322-2 --email you@example.com --open-at "2026-06-03 18:57" internval 0
 ./auto_submit.py --id 24-22322-1 --email you@example.com
 
 # Known open time -> ramp to 200ms polling in the last 30s before it.
@@ -27,6 +28,7 @@ to tell you it's already done.
     --open-at "2026-06-03 19:00" --fast-interval 0.2 --ramp-window 30
 
 # Multiple entries:
+./auto_submit.py --batch students.csv --open-at "2026-06-03 18:57" internval 0
 ./auto_submit.py --batch students.csv --interval 0
 
 # Watch + report timing only, never submit, never ping:
