@@ -15,7 +15,12 @@ it is detection latency + keeping a human out of the loop. So this script:
   3. The instant it detects open, it SUBMITS immediately in-process, verifies
      the response was recorded (empty questions array in the reply), and only
      THEN fires the Discord webhook to tell you it's already done.
-  4. Optional --open-at ramps the poll rate up to --fast-interval in the final
+  4. If the form is open but the submission is REJECTED (e.g. an admin rule like
+     "Only Allowed for 24-2 & 24-3 today" that hasn't been lifted yet), it does
+     not give up: it warns Discord ONCE, then keeps re-submitting every
+     --retry-interval seconds until the response is recorded, pinging the
+     instant it succeeds.
+  5. Optional --open-at ramps the poll rate up to --fast-interval in the final
      --ramp-window seconds before a known open time, so the submit fires the
      instant the page flips.
 
@@ -305,35 +310,79 @@ def load_entries(args):
     return entries
 
 
-def do_submissions(conn, entries, dry_run, no_discord):
+ERROR_PATTERNS = (
+    r'"errorMessage"\s*:\s*"([^"]+)"',
+    r'<div[^>]*role="alert"[^>]*>(.*?)</div>',
+    r'aria-label="([^"]*(?:not allowed|only allowed|invalid|required|error)[^"]*)"',
+)
+
+
+def extract_submit_error(reply_body):
+    """Best-effort: pull a human-readable validation message out of a rejected
+    formResponse reply (e.g. an admin rule like 'Only Allowed for 24-2 & 24-3').
+
+    Returns a short string, or '' if nothing recognizable was found.
+    """
+    for pat in ERROR_PATTERNS:
+        m = re.search(pat, reply_body, re.I | re.S)
+        if m:
+            txt = re.sub(r"<[^>]+>", " ", m.group(1))
+            txt = re.sub(r"\s+", " ", txt).strip()
+            if txt:
+                return txt[:200]
+    return ""
+
+
+def submit_one(conn, sid, mail, dry_run):
+    """Submit a single entry. Returns (ok, round_trip_ms, reason).
+
+    `reason` is '' on success, else the server's rejection text (or a fallback).
+    """
+    if dry_run:
+        log(f"[dry-run] would submit {sid} <{mail}>")
+        return True, 0.0, ""
     submit_headers = dict(BASE_HEADERS)
     submit_headers["Content-Type"] = "application/x-www-form-urlencoded"
-    all_ok = True
+    payload = urllib.parse.urlencode({
+        ENTRY_ID: sid, ENTRY_EMAIL: mail, "fvv": "1", "pageHistory": "0"})
+    t0 = time.monotonic()
+    try:
+        _, reply = conn.request("POST", SUBMIT_PATH, body=payload,
+                                headers=submit_headers)
+    except Exception as e:
+        return False, (time.monotonic() - t0) * 1000, f"error: {e}"
+    dt = (time.monotonic() - t0) * 1000
+    if submit_recorded(reply):
+        return True, dt, ""
+    return False, dt, (extract_submit_error(reply) or "response not recorded")
+
+
+def do_submissions(conn, entries, dry_run, no_discord):
+    """Submit every pending entry FIRST, then send Discord alerts.
+
+    Alerting is deliberately deferred until all submissions are fired so the
+    Discord round-trip never sits between two submissions (be-first matters).
+    Success pings go out here; rejection alerting is handled once by the caller.
+
+    Returns the list of (sid, mail, reason) entries that were NOT recorded and
+    should be retried. An empty list means everything went through.
+    """
+    results = []
     for sid, mail in entries:
-        payload = urllib.parse.urlencode({
-            ENTRY_ID: sid, ENTRY_EMAIL: mail, "fvv": "1", "pageHistory": "0"})
-        if dry_run:
-            log(f"[dry-run] would submit {sid} <{mail}>")
-            continue
-        t0 = time.monotonic()
-        try:
-            _, reply = conn.request("POST", SUBMIT_PATH, body=payload,
-                                    headers=submit_headers)
-            ok = submit_recorded(reply)
-        except Exception as e:
-            ok = False
-            log(f"submit ERROR {sid}: {e}")
-        dt = (time.monotonic() - t0) * 1000
-        log(f"[{'OK' if ok else 'FAILED'}] {sid} <{mail}>  ({dt:.0f}ms)")
-        all_ok = all_ok and ok
-        if not no_discord:
-            if ok:
+        ok, dt, reason = submit_one(conn, sid, mail, dry_run)
+        log(f"[{'OK' if ok else 'FAILED'}] {sid} <{mail}>  ({dt:.0f}ms)"
+            + (f"  — {reason}" if reason else ""))
+        results.append((sid, mail, ok, dt, reason))
+
+    still_failed = []
+    for sid, mail, ok, dt, reason in results:
+        if ok:
+            if not no_discord and not dry_run:
                 discord(f"✅ **Submitted** `{sid}` <{mail}> at {now_ms()} "
                         f"(round-trip {dt:.0f}ms). Form token generated.")
-            else:
-                discord(f"⚠️ **Submission FAILED** for `{sid}` <{mail}> "
-                        f"at {now_ms()}. Check manually!")
-    return all_ok
+        else:
+            still_failed.append((sid, mail, reason))
+    return still_failed
 
 
 def main():
@@ -351,6 +400,10 @@ def main():
                          "AM/PM and 2-digit years are NOT accepted.")
     ap.add_argument("--ramp-window", type=float, default=30,
                     help="Seconds before --open-at to switch to fast polling (default 30)")
+    ap.add_argument("--retry-interval", type=float, default=5.0,
+                    help="When the form is OPEN but the submission is rejected "
+                         "(e.g. an admin restriction not lifted yet), seconds to "
+                         "wait before retrying the submission (default 5)")
     ap.add_argument("--max-minutes", type=float, default=0,
                     help="Stop after N minutes (0 = run until open, default)")
     ap.add_argument("--dry-run", action="store_true",
@@ -406,8 +459,15 @@ def main():
     # (a block episode), and once more when polling recovers. Suppressed in
     # dry-run / --no-discord, and disabled entirely when --block-alert-after 0.
     block_alerts = args.block_alert_after > 0 and not args.dry_run and not args.no_discord
+    submit_alerts = not args.dry_run and not args.no_discord
     consec_fail = 0
     block_alerted = False
+
+    # Entries not yet successfully recorded. We retry the rejected ones in place
+    # (form open but submission refused, e.g. admin restriction not lifted yet)
+    # without re-stopping, and warn on Discord only ONCE per rejection episode.
+    pending = list(entries)
+    reject_alerted = False
 
     polls = 0
     while True:
@@ -420,6 +480,7 @@ def main():
             secs_to_open = (open_at - datetime.now()).total_seconds()
             if secs_to_open <= args.ramp_window:
                 interval = args.fast_interval
+        sleep_for = interval
 
         bad = None  # reason string if this poll failed/blocked
         try:
@@ -429,12 +490,33 @@ def main():
             if is_blocked(status, body):
                 bad = f"blocked/throttled (http {status})"
             elif is_open(body):
-                log(f"FORM OPEN detected after {polls} polls (http {status}). "
+                log(f"FORM OPEN detected (poll #{polls}, http {status}). "
                     "Submitting NOW.")
-                ok = do_submissions(conn, entries, args.dry_run, args.no_discord)
-                if not args.dry_run and ok:
-                    open(DONE_FLAG, "w").close()
-                return 0 if ok else 1
+                still_failed = do_submissions(conn, pending, args.dry_run,
+                                              args.no_discord)
+                pending = [(sid, mail) for sid, mail, _ in still_failed]
+                if not pending:
+                    if not args.dry_run:
+                        open(DONE_FLAG, "w").close()
+                    log("All submissions recorded. Done.")
+                    return 0
+                # Submission(s) refused though the form is open. The POSTs have
+                # already fired; warn once, then keep retrying every
+                # --retry-interval seconds until they go through.
+                reasons = "; ".join(sorted({r for *_, r in still_failed if r}))
+                log(f"{len(pending)} submission(s) rejected"
+                    + (f": {reasons}" if reasons else "")
+                    + f" — retrying every {args.retry_interval}s.")
+                if submit_alerts and not reject_alerted:
+                    n = len(pending)
+                    discord(f"⚠️ **Form is OPEN but submission was REJECTED** at "
+                            f"{now_ms()} for {n} entr{'y' if n == 1 else 'ies'}"
+                            + (f" ({reasons})" if reasons else "")
+                            + ". Likely the admin restriction isn't lifted yet. "
+                            "Will KEEP RETRYING and ping the instant it goes "
+                            "through — no further alerts until then.")
+                    reject_alerted = True
+                sleep_for = args.retry_interval
             elif polls % 20 == 1:  # avoid log spam
                 log(f"still closed (poll #{polls}, http {status})")
         except Exception as e:
@@ -456,7 +538,7 @@ def main():
             consec_fail = 0
             block_alerted = False
 
-        time.sleep(interval)
+        time.sleep(sleep_for)
 
 
 if __name__ == "__main__":
